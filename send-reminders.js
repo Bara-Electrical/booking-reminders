@@ -145,7 +145,7 @@ async function sendSms(phoneNumber, content) {
 // DATE HELPERS
 // =========================
 // Perth (AWST) is UTC+8 year-round — no daylight saving.
-function perthDatePlusDays(days) {
+function perthDateParts(days = 0) {
   const now = new Date();
   const perthMs = now.getTime() + 8 * 60 * 60 * 1000;
   const perth = new Date(perthMs);
@@ -155,6 +155,34 @@ function perthDatePlusDays(days) {
     month: perth.getUTCMonth() + 1,
     day: perth.getUTCDate(),
   };
+}
+
+// 0 = Sunday, 6 = Saturday
+function dayOfWeek({ year, month, day }) {
+  return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+}
+
+function addCalendarDays({ year, month, day }, n) {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  d.setUTCDate(d.getUTCDate() + n);
+  return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
+}
+
+// Steps forward one calendar day at a time, only counting weekdays,
+// so "2 business days" from Thu lands on Mon and from Fri lands on Tue.
+function addBusinessDays(startParts, n) {
+  let parts = startParts;
+  let remaining = n;
+  while (remaining > 0) {
+    parts = addCalendarDays(parts, 1);
+    const dow = dayOfWeek(parts);
+    if (dow !== 0 && dow !== 6) remaining--;
+  }
+  return parts;
+}
+
+function targetBookingDate() {
+  return addBusinessDays(perthDateParts(0), 2);
 }
 
 // AroFlo where-clause format: YYYY/MM/DD
@@ -176,16 +204,38 @@ NO REPLY`;
 }
 
 // =========================
-// MAIN
+// RUN MODE
 // =========================
-const DRY_RUN = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
+const EXPLICIT_DRY_RUN = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
 const testJobArg = process.argv.find((a) => a.startsWith("--job="));
 const TEST_JOB_NUMBER = testJobArg ? testJobArg.split("=")[1] : null;
 
-async function main() {
-  if (DRY_RUN) console.log("=== DRY RUN — no SMS will be sent, no notes will be written ===\n");
+// Any CLI flag means "someone is manually testing this right now" — run once
+// immediately and exit. No flags (the normal Railway/production invocation)
+// means run as a persistent service that only wakes up at 9am AWST.
+const RUN_ONCE = EXPLICIT_DRY_RUN || !!TEST_JOB_NUMBER || process.argv.includes("--once");
 
-  const targetDate = perthDatePlusDays(2);
+// Hard safety gate: a live send (real SMS, real notes) only ever happens if
+// CONFIRM_LIVE=yes is explicitly set. Anything else — a bare deploy restart,
+// a misconfigured Railway service, a forgotten flag — falls back to a safe
+// no-op dry run instead of silently texting real customers.
+const CONFIRM_LIVE = process.env.CONFIRM_LIVE === "yes";
+const DRY_RUN = EXPLICIT_DRY_RUN || !CONFIRM_LIVE;
+
+async function runReminderJob() {
+  if (EXPLICIT_DRY_RUN) {
+    console.log("=== DRY RUN (--dry-run) — no SMS will be sent, no notes will be written ===\n");
+  } else if (!CONFIRM_LIVE) {
+    console.log("=== CONFIRM_LIVE is not set to 'yes' — forcing dry run as a safety default ===\n");
+  }
+
+  const todayDow = dayOfWeek(perthDateParts(0));
+  if (!TEST_JOB_NUMBER && (todayDow === 0 || todayDow === 6)) {
+    console.log("Today is a weekend in Perth — skipping run.");
+    return;
+  }
+
+  const targetDate = targetBookingDate();
   const arofloDate = toArofloDate(targetDate);
   const auDate = toAuDate(targetDate);
 
@@ -250,7 +300,57 @@ async function main() {
   console.log(`\nDone. Sent: ${sentCount}, Skipped (no phone): ${skippedCount}, Total: ${jobs.length}`);
 }
 
-main().catch((err) => {
-  console.error("FATAL:", err.response?.data || err.message);
-  process.exit(1);
-});
+// =========================
+// SCHEDULER (persistent service mode)
+// =========================
+// Milliseconds until next 9:00am Perth (AWST = UTC+8, no daylight saving).
+function msUntilNineAmPerth() {
+  const now = new Date();
+  const perthMs = now.getTime() + 8 * 60 * 60 * 1000;
+  const perth = new Date(perthMs);
+  const perthHour = perth.getUTCHours();
+  const daysToAdd = perthHour < 9 ? 0 : 1;
+  const next9amUTC = new Date(Date.UTC(
+    perth.getUTCFullYear(), perth.getUTCMonth(), perth.getUTCDate() + daysToAdd,
+    1, 0, 0 // 9am AWST = 1am UTC
+  ));
+  return next9amUTC - now;
+}
+
+function scheduleNextRun() {
+  const waitMs = msUntilNineAmPerth();
+  console.log(`Next run scheduled in ${(waitMs / 1000 / 60 / 60).toFixed(1)} hours (9am AWST).`);
+  setTimeout(async () => {
+    try {
+      await runReminderJob();
+    } catch (err) {
+      console.error("Reminder job failed:", err.response?.data || err.message);
+    }
+    scheduleNextRun();
+  }, waitMs);
+}
+
+// Minimal HTTP responder so Railway's health check has something to hit —
+// this service does no request handling of its own, it just needs to stay alive.
+function startHealthServer() {
+  const http = require("http");
+  const port = process.env.PORT || 3000;
+  http.createServer((req, res) => res.end("booking-reminders is running")).listen(port);
+  console.log(`Health server listening on port ${port}.`);
+}
+
+// =========================
+// ENTRYPOINT
+// =========================
+if (RUN_ONCE) {
+  runReminderJob()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error("FATAL:", err.response?.data || err.message);
+      process.exit(1);
+    });
+} else {
+  console.log("Starting booking-reminders as a persistent service.");
+  startHealthServer();
+  scheduleNextRun();
+}
