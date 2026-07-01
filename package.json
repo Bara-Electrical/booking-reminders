@@ -1,0 +1,18 @@
+{
+  "name": "booking-reminders",
+  "version": "1.0.0",
+  "description": "Sends SMS booking reminders for AroFlo jobs booked 2 days ahead",
+  "main": "send-reminders.js",
+  "scripts": {
+    "start": "node send-reminders.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.17.0",
+    "crypto-js": "^4.2.0",
+    "dotenv": "^17.4.2"
+  }
+}
