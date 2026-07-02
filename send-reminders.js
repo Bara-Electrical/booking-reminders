@@ -120,11 +120,17 @@ async function addNote(task, noteText) {
 // =========================
 // PHONE NUMBERS
 // =========================
+// Australian mobiles only — normalised form is +614 followed by 8 digits.
+// Landlines and malformed numbers (e.g. missing area code) are dropped since
+// MessageMedia can't SMS them anyway.
+const AU_MOBILE_RE = /^\+614\d{8}$/;
+
 function extractPhones(sitePhoneField) {
   if (!sitePhoneField) return [];
   const raw = sitePhoneField.split(",").map((s) => s.trim()).filter(Boolean);
   const normalise = (n) => n.replace(/\s+/g, "").replace(/^0/, "+61");
-  return [...new Set(raw.map(normalise))];
+  const normalised = raw.map(normalise);
+  return [...new Set(normalised.filter((n) => AU_MOBILE_RE.test(n)))];
 }
 
 // =========================
@@ -265,12 +271,12 @@ async function runReminderJob() {
     const phones = extractPhones(location?.SitePhone);
 
     if (phones.length === 0) {
-      console.log(`Job ${task.jobnumber}: no phone on file — skipping.`);
+      console.log(`Job ${task.jobnumber}: no mobile number on file — skipping.`);
       if (!DRY_RUN) {
         await sleep(1100);
         await addNote(
           task,
-          `Bara AI: booking reminder SMS not sent — no contact phone number on file for this property.`
+          `Bara AI: booking reminder SMS not sent — no mobile phone number on file for this property.`
         );
       }
       skippedCount++;
