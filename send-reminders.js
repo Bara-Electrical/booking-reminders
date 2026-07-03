@@ -1,6 +1,28 @@
 require("dotenv").config();
 const axios = require("axios");
 const CryptoJS = require("crypto-js");
+const Airtable = require("airtable");
+
+// =========================
+// ACTIVITY LOG (Airtable)
+// =========================
+let airtableBase = null;
+if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID) {
+  airtableBase = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+} else {
+  console.warn("AIRTABLE_API_KEY or AIRTABLE_BASE_ID not set — activity logging disabled");
+}
+
+async function logActivity(action) {
+  if (!airtableBase) return;
+  try {
+    await airtableBase("Activity Log").create([{
+      fields: { "Action": action, "Department": "Scheduling" },
+    }]);
+  } catch (err) {
+    console.warn("Airtable activity log failed:", err.message);
+  }
+}
 
 // =========================
 // AROFLO
@@ -304,6 +326,10 @@ async function runReminderJob() {
   }
 
   console.log(`\nDone. Sent: ${sentCount}, Skipped (no phone): ${skippedCount}, Total: ${jobs.length}`);
+
+  if (!DRY_RUN && !TEST_JOB_NUMBER) {
+    await logActivity(`Booking reminder SMS sent for ${sentCount} jobs`);
+  }
 }
 
 // =========================
