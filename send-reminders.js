@@ -47,8 +47,8 @@ function buildHeaders(method, query, extra = {}) {
   return {
     Accept: AROFLO_ACCEPT,
     Authorization: AROFLO_AUTH,
-    "af-hmac-signature": sig,
-    "af-iso-timestamp": ts,
+    Authentication: "HMAC " + sig,
+    afdatetimeutc: ts,
     ...extra,
   };
 }
@@ -89,19 +89,72 @@ async function arofloPost(body, retries = 5) {
   throw new Error("AroFlo POST rate limit retries exhausted");
 }
 
-async function getBookedJobsForDate(dueDate) {
+// AroFlo date strings look like "YYYY/MM/DD" or "YYYY/MM/DD HH:MM:SS".
+function parseArofloDateString(str) {
+  const [year, month, day] = str.split(" ")[0].split("/").map(Number);
+  return { year, month, day };
+}
+
+async function getSchedulesForDate(startDate) {
   const params = [
-    "zone=tasks",
-    "where=" + encodeURIComponent(`and|duedate|=|${dueDate}`),
+    "zone=schedules",
+    "where=" + encodeURIComponent(`and|startdate|=|${startDate}`),
     "page=1",
   ].join("&");
   const data = await arofloGet(params);
-  const tasks = data.zoneresponse?.tasks || [];
-  return tasks.filter(
-    (t) =>
-      t.status === "Not Started" &&
-      (t.substatus?.substatus || "").startsWith("6 Booked")
-  );
+  const schedules = data.zoneresponse?.schedules || [];
+  return Array.isArray(schedules) ? schedules : [schedules];
+}
+
+async function getSchedulesForTaskId(taskId) {
+  const params = [
+    "zone=schedules",
+    "where=" + encodeURIComponent(`and|taskid|=|${taskId}`),
+    "page=1",
+  ].join("&");
+  const data = await arofloGet(params);
+  const schedules = data.zoneresponse?.schedules || [];
+  return Array.isArray(schedules) ? schedules : [schedules];
+}
+
+async function getTaskByTaskId(taskId) {
+  const params = [
+    "zone=tasks",
+    "where=" + encodeURIComponent(`and|taskid|=|${taskId}`),
+    "page=1",
+  ].join("&");
+  const data = await arofloGet(params);
+  return data.zoneresponse?.tasks?.[0] || null;
+}
+
+// The task's own duedate/duedatetime fields can drift from the real booked
+// slot (e.g. after a reschedule), so the Schedules zone — not duedate — is
+// the source of truth for both which jobs get reminded and what date goes
+// in the SMS. Returns [{ task, startParts }] for jobs actually booked on
+// the given date.
+async function getBookedJobsForDate(startDate) {
+  const schedules = await getSchedulesForDate(startDate);
+  const taskIds = [
+    ...new Set(
+      schedules
+        .filter((s) => s.scheduletype?.type === "task")
+        .map((s) => s.scheduletype.typeid)
+    ),
+  ];
+
+  const results = [];
+  for (const taskId of taskIds) {
+    await sleep(1100);
+    const task = await getTaskByTaskId(taskId);
+    if (
+      task &&
+      task.status === "Not Started" &&
+      (task.substatus?.substatus || "").startsWith("6 Booked")
+    ) {
+      results.push({ task, startParts: parseArofloDateString(startDate) });
+    }
+  }
+  return results;
 }
 
 async function getTaskByJobNumber(jobNumber) {
@@ -265,7 +318,6 @@ async function runReminderJob() {
 
   const targetDate = targetBookingDate();
   const arofloDate = toArofloDate(targetDate);
-  const auDate = toAuDate(targetDate);
 
   let jobs;
   if (TEST_JOB_NUMBER) {
@@ -275,9 +327,18 @@ async function runReminderJob() {
       console.log(`Job ${TEST_JOB_NUMBER} not found.`);
       return;
     }
-    jobs = [task];
+    await sleep(1100);
+    const schedules = await getSchedulesForTaskId(task.taskid);
+    if (schedules.length === 0) {
+      console.log(`Job ${TEST_JOB_NUMBER} has no schedule entry in AroFlo — can't confirm a real booked date, skipping.`);
+      return;
+    }
+    if (schedules.length > 1) {
+      console.log(`Job ${TEST_JOB_NUMBER} has ${schedules.length} schedule entries — using the first: ${schedules[0].startdate}.`);
+    }
+    jobs = [{ task, startParts: parseArofloDateString(schedules[0].startdate) }];
   } else {
-    console.log(`Fetching booked jobs due ${arofloDate}...`);
+    console.log(`Fetching jobs actually booked (per AroFlo Schedules) for ${arofloDate}...`);
     jobs = await getBookedJobsForDate(arofloDate);
     console.log(`Found ${jobs.length} booked jobs.\n`);
   }
@@ -285,9 +346,10 @@ async function runReminderJob() {
   let sentCount = 0;
   let skippedCount = 0;
 
-  for (const task of jobs) {
+  for (const { task, startParts } of jobs) {
     await sleep(1100);
 
+    const auDate = toAuDate(startParts);
     const locationId = task.tasklocation?.locationid;
     const location = locationId ? await getLocationContact(locationId) : null;
     const phones = extractPhones(location?.SitePhone);
