@@ -290,6 +290,8 @@ NO REPLY`;
 const EXPLICIT_DRY_RUN = process.argv.includes("--dry-run") || process.env.DRY_RUN === "true";
 const testJobArg = process.argv.find((a) => a.startsWith("--job="));
 const TEST_JOB_NUMBER = testJobArg ? testJobArg.split("=")[1] : null;
+const testDateArg = process.argv.find((a) => a.startsWith("--date="));
+const TEST_DATE = testDateArg ? testDateArg.split("=")[1] : null; // YYYY/MM/DD, overrides the 2-business-day target for manual testing
 
 // Any CLI flag means "someone is manually testing this right now" — run once
 // immediately and exit. No flags (the normal Railway/production invocation)
@@ -317,7 +319,7 @@ async function runReminderJob() {
   }
 
   const targetDate = targetBookingDate();
-  const arofloDate = toArofloDate(targetDate);
+  const arofloDate = TEST_DATE || toArofloDate(targetDate);
 
   let jobs;
   if (TEST_JOB_NUMBER) {
