@@ -1,26 +1,30 @@
 require("dotenv").config();
 const axios = require("axios");
 const CryptoJS = require("crypto-js");
-const Airtable = require("airtable");
 
 // =========================
-// ACTIVITY LOG (Airtable)
+// ACTIVITY LOG (Bara dashboard)
 // =========================
-let airtableBase = null;
-if (process.env.AIRTABLE_API_KEY && process.env.AIRTABLE_BASE_ID) {
-  airtableBase = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
-} else {
-  console.warn("AIRTABLE_API_KEY or AIRTABLE_BASE_ID not set — activity logging disabled");
+// The shared activity log lives in the Bara dashboard's database, the same log
+// annual-reminders, quote-follow-ups and workorder-emails write to. It was an Airtable
+// table until Sep 2026, when Airtable was decommissioned.
+const LOG_API = process.env.DASHBOARD_URL?.replace(/\/$/, "");
+if (!LOG_API || !process.env.LOG_API_SECRET) {
+  console.warn("DASHBOARD_URL or LOG_API_SECRET not set — activity logging disabled");
 }
 
+// Swallows its own failures: a missing log line must never make a completed send look failed.
 async function logActivity(action) {
-  if (!airtableBase) return;
+  if (!LOG_API || !process.env.LOG_API_SECRET) return;
   try {
-    await airtableBase("Activity Log").create([{
-      fields: { "Action": action, "Department": "Scheduling" },
-    }]);
+    const res = await fetch(`${LOG_API}/api/log/activity`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.LOG_API_SECRET}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ action, department: "Scheduling", source: "booking-reminders" }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 200)}`);
   } catch (err) {
-    console.warn("Airtable activity log failed:", err.message);
+    console.warn("Activity log failed:", err.message);
   }
 }
 
